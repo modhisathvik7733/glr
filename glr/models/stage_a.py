@@ -2,17 +2,21 @@
 
 Forward pass:
     image -> Absorb (CNN + slot attention + TPR) -> slots
-    slots -> spatial broadcast decoder -> reconstructed image (per-slot + alpha mask)
+    slots -> decoder -> reconstructed image (per-slot + alpha mask)
     slots -> masked-prediction head -> predicted feature for masked patches
 
-Stage A trains the Absorb-only model under a multi-objective loss (reconstruction +
-masked prediction + VICReg + slot consistency). Resonate / Emit / Stage B+ logic
-lives elsewhere.
+Two decoder choices:
 
-The decoder follows Locatello et al.'s spatial broadcast pattern: each slot is
-broadcast onto a spatial grid, decoded into RGB+alpha, and combined via softmax
-over slot alphas. This is the standard object-centric reconstruction head and
-gives us interpretable per-slot attribution for the causal slot-swap eval.
+  - ``token`` (default, DINOSAUR-style): each slot attends to a small grid of
+    patch tokens (e.g. 8x8 = 64 patches for a 64x64 image), produces per-patch
+    features, then unpatchifies to pixels. Compute scales as B*K*num_patches,
+    typically 64x cheaper than spatial broadcast on 64x64 images.
+  - ``spatial`` (Locatello et al.): broadcasts every slot to every pixel and
+    runs a 4-layer conv stack. Simpler, but ~50 TFLOPs per conv layer at
+    plan-spec K=64 — too expensive in practice on a 64x64 grid.
+
+Both decoders produce the same outputs (recon, masks, per_slot_recon) and are
+swappable via the ``decoder_type`` argument on ``StageAModel``.
 """
 
 from __future__ import annotations
@@ -98,6 +102,102 @@ class SpatialBroadcastDecoder(nn.Module):
         return recon, masks, rgb
 
 
+class TokenDecoder(nn.Module):
+    """DINOSAUR-style token decoder: ~64x cheaper than spatial broadcast at 64x64.
+
+    Each slot is broadcast to a small grid of patch tokens (e.g. 8x8 = 64
+    patches for a 64x64 image), passed through a few MLP blocks with patch
+    position embeddings, and projected to per-patch (RGB+alpha) values that
+    are unpatchified to image space. Per-slot rgb/alpha are mixed via softmax
+    over slots, exactly like the spatial broadcast decoder — same outputs,
+    same training signal, much less compute.
+
+    Compute scaling: O(B * K * num_patches * hidden_dim^2) per MLP block.
+    With num_patches=64 vs 4096 spatial positions, this is 64x cheaper than
+    spatial broadcast on 64x64 images.
+    """
+
+    def __init__(
+        self,
+        slot_dim: int,
+        out_channels: int,
+        image_size: int,
+        patch_size: int = 8,
+        hidden_dim: int = 512,
+        num_layers: int = 4,
+        mlp_ratio: float = 2.0,
+        use_checkpointing: bool = False,
+    ) -> None:
+        super().__init__()
+        if image_size % patch_size != 0:
+            raise ValueError(f"image_size ({image_size}) must be divisible by patch_size ({patch_size})")
+        self.image_size = image_size
+        self.patch_size = patch_size
+        self.num_patches_per_side = image_size // patch_size
+        self.num_patches = self.num_patches_per_side ** 2
+        self.out_channels = out_channels
+        self.hidden_dim = hidden_dim
+        self.use_checkpointing = use_checkpointing
+
+        # Per-patch positional bias, shared across slots and batch
+        self.pos_embed = nn.Parameter(torch.zeros(1, 1, self.num_patches, hidden_dim))
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+        # Project slot vectors to decoder hidden dim once
+        self.slot_in = nn.Linear(slot_dim, hidden_dim)
+        self.norm_in = nn.LayerNorm(hidden_dim)
+
+        # Stack of pre-norm residual MLP blocks
+        hidden_inner = int(hidden_dim * mlp_ratio)
+        self.blocks = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.LayerNorm(hidden_dim),
+                    nn.Linear(hidden_dim, hidden_inner),
+                    nn.GELU(),
+                    nn.Linear(hidden_inner, hidden_dim),
+                )
+                for _ in range(num_layers)
+            ]
+        )
+
+        # Output: hidden_dim -> patch_size^2 * (C + 1) per patch token
+        self.norm_out = nn.LayerNorm(hidden_dim)
+        self.head = nn.Linear(hidden_dim, patch_size * patch_size * (out_channels + 1))
+
+    def forward(self, slots: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """slots: (B, K, slot_dim) -> (recon, masks, per_slot_recon)."""
+        b, k, _ = slots.shape
+
+        # (B, K, slot_dim) -> (B, K, hidden) -> (B, K, num_patches, hidden) via expand
+        x = self.norm_in(self.slot_in(slots))
+        x = x.unsqueeze(2).expand(-1, -1, self.num_patches, -1).contiguous()
+        x = x + self.pos_embed  # (1, 1, num_patches, hidden) broadcasts
+
+        # Residual MLP blocks
+        for block in self.blocks:
+            if self.use_checkpointing and self.training:
+                x = x + torch.utils.checkpoint.checkpoint(block, x, use_reentrant=False)
+            else:
+                x = x + block(x)
+
+        # Project to per-patch (RGB + alpha) pixels
+        x = self.head(self.norm_out(x))
+        # (B, K, num_patches, ph*pw*(C+1)) -> (B, K, h_p, w_p, ph, pw, C+1)
+        h_p = w_p = self.num_patches_per_side
+        x = x.view(b, k, h_p, w_p, self.patch_size, self.patch_size, self.out_channels + 1)
+        # Unpatchify: combine (h_p, ph) -> H and (w_p, pw) -> W
+        # (B, K, h_p, w_p, ph, pw, C+1) -> (B, K, C+1, h_p, ph, w_p, pw) -> (B, K, C+1, H, W)
+        x = x.permute(0, 1, 6, 2, 4, 3, 5).contiguous()
+        x = x.view(b, k, self.out_channels + 1, self.image_size, self.image_size)
+
+        rgb = x[:, :, : self.out_channels]
+        alpha = x[:, :, self.out_channels : self.out_channels + 1]
+        masks = alpha.softmax(dim=1)
+        recon = (rgb * masks).sum(dim=1)
+        return recon, masks, rgb
+
+
 class MaskedPredictionHead(nn.Module):
     """Predict masked-patch features from slot states (simple JEPA-ish surrogate)."""
 
@@ -143,6 +243,9 @@ class StageAModel(nn.Module):
         slot_iters: int = 3,
         sinkhorn_iters: int = 3,
         decoder_hidden: int = 64,
+        decoder_type: str = "token",  # "token" (default, fast) or "spatial" (legacy)
+        decoder_layers: int = 4,        # only used by token decoder
+        patch_size: int = 8,            # only used by token decoder
         use_checkpointing: bool = False,
     ) -> None:
         super().__init__()
@@ -158,13 +261,26 @@ class StageAModel(nn.Module):
             sinkhorn_iters=sinkhorn_iters,
             use_checkpointing=use_checkpointing,
         )
-        self.decoder = SpatialBroadcastDecoder(
-            slot_dim=slot_dim,
-            out_channels=in_channels,
-            image_size=image_size,
-            hidden_dim=decoder_hidden,
-            use_checkpointing=use_checkpointing,
-        )
+        if decoder_type == "token":
+            self.decoder = TokenDecoder(
+                slot_dim=slot_dim,
+                out_channels=in_channels,
+                image_size=image_size,
+                patch_size=patch_size,
+                hidden_dim=decoder_hidden,
+                num_layers=decoder_layers,
+                use_checkpointing=use_checkpointing,
+            )
+        elif decoder_type == "spatial":
+            self.decoder = SpatialBroadcastDecoder(
+                slot_dim=slot_dim,
+                out_channels=in_channels,
+                image_size=image_size,
+                hidden_dim=decoder_hidden,
+                use_checkpointing=use_checkpointing,
+            )
+        else:
+            raise ValueError(f"decoder_type must be 'token' or 'spatial', got {decoder_type!r}")
         self.masked_pred = MaskedPredictionHead(slot_dim, feat_dim)
         self.config = dict(
             image_size=image_size,
@@ -174,6 +290,7 @@ class StageAModel(nn.Module):
             num_slots=num_slots,
             num_roles=num_roles,
             filler_dim=filler_dim,
+            decoder_type=decoder_type,
         )
 
     def forward(self, image: torch.Tensor) -> dict[str, torch.Tensor]:

@@ -72,7 +72,8 @@ def test_stage_a_backward_with_checkpointing():
     """Gradient checkpointing path produces non-zero gradients on the same params."""
     m = StageAModel(
         image_size=16, in_channels=1, feat_dim=16, slot_dim=32, num_slots=4,
-        num_roles=4, filler_dim=8, decoder_hidden=16, use_checkpointing=True,
+        num_roles=4, filler_dim=8, decoder_hidden=16, decoder_type="spatial",
+        use_checkpointing=True,
     )
     m.train()
     img = torch.randn(2, 1, 16, 16, requires_grad=False)
@@ -83,3 +84,39 @@ def test_stage_a_backward_with_checkpointing():
     dec_grad = m.decoder.net[0].weight.grad
     assert enc_grad is not None and enc_grad.abs().sum() > 0
     assert dec_grad is not None and dec_grad.abs().sum() > 0
+
+
+def test_token_decoder_forward_backward():
+    """Token decoder produces valid recon/masks/per_slot_recon and gradients flow."""
+    m = StageAModel(
+        image_size=16, in_channels=1, feat_dim=16, slot_dim=32, num_slots=4,
+        num_roles=4, filler_dim=8, decoder_hidden=32, decoder_type="token",
+        decoder_layers=2, patch_size=4,
+    )
+    img = torch.randn(2, 1, 16, 16)
+    out = m(img)
+    assert out["recon"].shape == (2, 1, 16, 16)
+    assert out["masks"].shape == (2, 4, 1, 16, 16)
+    assert out["per_slot_recon"].shape == (2, 4, 1, 16, 16)
+    # masks must softmax-sum to 1 across slots
+    mask_sum = out["masks"].sum(dim=1)
+    assert torch.allclose(mask_sum, torch.ones_like(mask_sum), atol=1e-4)
+    # backward
+    loss = out["recon"].pow(2).mean() + out["pred_feats"].pow(2).mean()
+    loss.backward()
+    enc_grad = m.absorb.encoder.net[0].weight.grad
+    dec_grad = m.decoder.head.weight.grad
+    assert enc_grad is not None and enc_grad.abs().sum() > 0
+    assert dec_grad is not None and dec_grad.abs().sum() > 0
+
+
+def test_token_decoder_param_count_smaller_than_spatial():
+    """Sanity check: token decoder has far fewer params than spatial broadcast at the
+    same hidden_dim, validating it's actually the lighter path."""
+    common = dict(
+        image_size=64, in_channels=1, feat_dim=128, slot_dim=256, num_slots=16,
+        num_roles=16, filler_dim=16, decoder_hidden=256,
+    )
+    spatial = StageAModel(**common, decoder_type="spatial")
+    token = StageAModel(**common, decoder_type="token", decoder_layers=4, patch_size=8)
+    assert token.n_params() < spatial.n_params()

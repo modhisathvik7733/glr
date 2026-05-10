@@ -1,5 +1,6 @@
 # Stage A — Concept Physics on dSprites / synthetic factor data.
-# Sized to fit a single A100 80GB; tune up batch size if memory allows.
+# Plan-spec on A100 80GB with the DINOSAUR-style token decoder:
+# ~33M params, ~2-3 steps/s expected.
 
 seed: 0
 device: cuda  # or cpu / mps
@@ -10,21 +11,23 @@ data:
   root: data/raw            # location of dsprites_*.npz if source=dsprites
   image_size: 64
   in_channels: 1
-  batch_size: 256
+  batch_size: 64            # safe with token decoder; tune up if VRAM allows
   num_workers: 4
   two_view: true
   held_out_count: 4         # number of (shape, scale) tuples to exclude from training
   held_out_keys: [shape, scale]
 
 model:
-  feat_dim: 64
-  slot_dim: 128
-  num_slots: 8
-  num_roles: 8
-  filler_dim: 16
+  feat_dim: 448
+  slot_dim: 512             # PLAN SPEC = 16 roles * 32 filler_dim
+  num_slots: 64             # PLAN SPEC
+  num_roles: 16             # PLAN SPEC
+  filler_dim: 32            # PLAN SPEC
   slot_iters: 3
   sinkhorn_iters: 3
-  decoder_hidden: 64
+  decoder_type: token       # DINOSAUR-style; ~64x cheaper than 'spatial'
+  decoder_hidden: 768
+  decoder_layers: 6
 
 training:
   lr: 5.0e-4

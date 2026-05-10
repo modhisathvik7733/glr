@@ -46,6 +46,8 @@ class StageATrainerConfig:
     slot_iters: int = 3
     sinkhorn_iters: int = 3
     decoder_hidden: int = 64
+    decoder_type: str = "token"   # "token" (DINOSAUR-style, fast) or "spatial" (legacy)
+    decoder_layers: int = 4       # only used by token decoder
     # optim
     lr: float = 5e-4
     weight_decay: float = 0.1
@@ -98,6 +100,9 @@ class StageATrainer:
             slot_iters=config.slot_iters,
             sinkhorn_iters=config.sinkhorn_iters,
             decoder_hidden=config.decoder_hidden,
+            decoder_type=config.decoder_type,
+            decoder_layers=config.decoder_layers,
+            patch_size=config.patch_size,
             use_checkpointing=config.use_checkpointing,
         )
         self.optim: torch.optim.Optimizer | None = None

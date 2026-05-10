@@ -114,6 +114,8 @@ def main() -> None:
         slot_iters=cfg["model"]["slot_iters"],
         sinkhorn_iters=cfg["model"]["sinkhorn_iters"],
         decoder_hidden=cfg["model"]["decoder_hidden"],
+        decoder_type=cfg["model"].get("decoder_type", "token"),
+        decoder_layers=cfg["model"].get("decoder_layers", 4),
         lr=cfg["training"]["lr"],
         weight_decay=cfg["training"]["weight_decay"],
         betas=tuple(cfg["training"]["betas"]),
