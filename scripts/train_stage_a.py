@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 from glr.data import DSpritesDataset, SyntheticFactorDataset, make_compositional_splits
 from glr.data.dsprites import DSPRITES_FACTORS
 from glr.eval.mig import mutual_information_gap
-from glr.eval.probe import probe_all_factors
+from glr.eval.probe import probe_all_factors, probe_per_slot_best
 from glr.train.stage_a import StageATrainer, StageATrainerConfig
 from glr.utils.config import load_config
 from glr.utils.seed import seed_all
@@ -63,9 +63,13 @@ def make_eval_fn(eval_loader: DataLoader, device: torch.device):
         train_feat, test_feat = feats[:cut], feats[cut:]
         train_lat, test_lat = latents[:cut], latents[cut:]
         probe_acc = probe_all_factors(train_feat, train_lat, test_feat, test_lat, factor_names)
+        # Per-slot best: surfaces factors that concentrate in a single slot
+        # (which the flat (K*D) probe can miss when most slots carry noise).
+        probe_best = probe_per_slot_best(train_feat, train_lat, test_feat, test_lat, factor_names)
         mig = mutual_information_gap(feats, latents, factor_names=factor_names)
         return {
             "probe": {k: round(v, 3) for k, v in probe_acc.items()},
+            "probe_best_slot": {k: round(v, 3) for k, v in probe_best.items()},
             "mig": round(mig["mig"], 3),
         }
 

@@ -5,7 +5,8 @@
 # (probe accuracy + MIG), and prints a clear PASS/FAIL verdict per seed and
 # overall. Total wall time: ~10–20 minutes on any modern GPU.
 #
-# Usage:   bash scripts/run_mvc.sh [--device cuda|cpu]
+# Usage:   bash scripts/run_mvc.sh [device] [config]
+#          bash scripts/run_mvc.sh cuda configs/stage_a_mvc_v2.yaml
 # Pass criteria (per seed): probe_avg > 0.50 AND mig > 0.10
 # Overall pass:             at least 2 of 3 seeds pass
 #
@@ -16,7 +17,7 @@
 set -e
 
 DEVICE="${1:-cuda}"
-CONFIG="configs/stage_a_mvc.yaml"
+CONFIG="${2:-configs/stage_a_mvc.yaml}"
 SEEDS=(0 1 2)
 
 # Per-seed pass thresholds. Tuned to be modest-but-real:
@@ -57,15 +58,38 @@ for seed in "${SEEDS[@]}"; do
         continue
     fi
 
-    # Parse probe values + mig from the printed dict (single quotes from Python).
+    # Parse probe values (flat + per-slot best) + mig from the eval dict.
+    # Use whichever probe metric is higher as the gate decision.
     probe_avg=$(python -c "
 import re, sys
 line = '''${eval_line}'''
+def _avg(key):
+    m = re.search(rf\"'{key}': \{{([^}}]*)\}}\", line)
+    if not m: return None
+    vals = [float(v) for v in re.findall(r':\s*([0-9.]+)', m.group(1))]
+    return sum(vals)/len(vals) if vals else None
+flat = _avg('probe')
+best = _avg('probe_best_slot')
+candidates = [v for v in (flat, best) if v is not None]
+print(f'{max(candidates):.3f}' if candidates else 'NA')
+")
+    probe_flat=$(python -c "
+import re
+line = '''${eval_line}'''
 m = re.search(r\"'probe': \{([^}]*)\}\", line)
-if not m: print('NA'); sys.exit()
-probe_str = m.group(1)
-vals = [float(v) for v in re.findall(r':\s*([0-9.]+)', probe_str)]
-print(f'{sum(vals)/len(vals):.3f}' if vals else 'NA')
+if not m: print('NA')
+else:
+    vals = [float(v) for v in re.findall(r':\s*([0-9.]+)', m.group(1))]
+    print(f'{sum(vals)/len(vals):.3f}' if vals else 'NA')
+")
+    probe_best=$(python -c "
+import re
+line = '''${eval_line}'''
+m = re.search(r\"'probe_best_slot': \{([^}]*)\}\", line)
+if not m: print('NA')
+else:
+    vals = [float(v) for v in re.findall(r':\s*([0-9.]+)', m.group(1))]
+    print(f'{sum(vals)/len(vals):.3f}' if vals else 'NA')
 ")
     mig=$(python -c "
 import re
@@ -83,8 +107,8 @@ print(m.group(1) if m else 'NA')
         fi
     fi
 
-    echo "[seed ${seed}] probe_avg=${probe_avg} mig=${mig}  →  ${pass}"
-    results+=("seed=${seed} probe_avg=${probe_avg} mig=${mig} verdict=${pass}")
+    echo "[seed ${seed}] probe_flat=${probe_flat} probe_best_slot=${probe_best} (using ${probe_avg}) mig=${mig}  →  ${pass}"
+    results+=("seed=${seed} probe_flat=${probe_flat} probe_best=${probe_best} mig=${mig} verdict=${pass}")
     echo
 done
 

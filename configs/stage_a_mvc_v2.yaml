@@ -1,0 +1,77 @@
+# Stage A — MVC v2: stronger smoke test after v1's clean fail.
+#
+# v1 (configs/stage_a_mvc.yaml) showed all 3 seeds failing the gate
+# (probe_avg ~0.15, mig ~0.003). Three plausible causes were left
+# unresolved by v1:
+#   1. only 1000 steps — DINOSAUR-style methods need 50k+ to converge
+#   2. procedural synthetic data is noisy compared to real dSprites
+#   3. 8 slots × 128 dim may be too tight when encoder yields 4096 tokens
+#
+# v2 addresses all three:
+#   - real dSprites (auto-falls-back to synthetic if .npz missing)
+#   - 5000 training steps (5× longer)
+#   - 12 slots × 192 dim, 4 decoder layers (more capacity to specialize)
+#
+# Total wall time: ~25-35 min on A100 for 3 seeds. If v2 passes the gate,
+# v1's fail was about budget/data, not architecture, and the full Stage A
+# run (10k steps, 33M params) is justified. If v2 also fails, the
+# architecture itself needs a rethink (likely candidates: token-grid
+# downsampling, harder masked-prediction, EMA target).
+
+seed: 0
+device: cuda
+out_dir: outputs/stage_a_mvc_v2
+
+data:
+  source: dsprites          # auto-falls-back to synthetic if .npz missing
+  root: data/raw
+  image_size: 64
+  in_channels: 1
+  batch_size: 64
+  num_workers: 2
+  two_view: true
+  held_out_count: 4
+  held_out_keys: [shape, scale]
+
+model:
+  feat_dim: 96
+  slot_dim: 192             # = num_roles(12) * filler_dim(16)
+  num_slots: 12             # was 8 — more buffer between empty/object slots
+  num_roles: 12
+  filler_dim: 16
+  slot_iters: 5             # was 3 — more iters help slots specialize
+  sinkhorn_iters: 3
+  decoder_type: token
+  decoder_hidden: 192
+  decoder_layers: 4         # was 2
+
+training:
+  lr: 3.0e-4
+  weight_decay: 0.1
+  betas: [0.9, 0.95]
+  grad_clip: 0.5
+  warmup_steps: 500
+  total_steps: 5000
+  aux_warmup_frac: 0.05
+  patch_size: 8
+  mask_ratio: 0.5           # was 0.4 — harder masked-prediction
+  pred_weight: 1.0
+  vicreg_var_weight: 0.5
+  vicreg_cov_weight: 0.2
+  vicreg_total_weight: 0.5
+  consistency_weight: 0.3
+  usage_balance_weight: 0.1
+  log_every: 100
+  eval_every: 1000
+  use_amp: true
+  use_compile: false        # avoid compile warmup pause for ~25-min run
+
+eval:
+  n_eval_samples: 1024
+  factors_to_probe: [shape, scale, orientation, pos_x, pos_y]
+
+wandb:
+  enabled: false
+  project: glr-stage-a-mvc
+  run_name: null
+  tags: [mvc, v2]
