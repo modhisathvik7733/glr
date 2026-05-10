@@ -132,6 +132,7 @@ def main() -> None:
         log_every=cfg["training"]["log_every"],
         eval_every=cfg["training"]["eval_every"],
         use_amp=cfg["training"].get("use_amp", True),
+        use_checkpointing=cfg["training"].get("use_checkpointing", False),
         out_dir=cfg["out_dir"],
         seed=cfg["seed"],
     )

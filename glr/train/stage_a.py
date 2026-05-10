@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +57,10 @@ class StageATrainerConfig:
     # Roughly halves activation memory and uses tensor cores; recommended on
     # any Ampere+ / RTX 30+ / RTX 40+ / RTX 50+ card.
     use_amp: bool = True
+    # gradient checkpointing on encoder + spatial-broadcast decoder. Required
+    # for plan-spec K=64, d=512 on a 32GB GPU. Costs ~1.3x compute, saves
+    # ~3-4x activation memory on the heaviest path.
+    use_checkpointing: bool = False
     # masked prediction
     mask_ratio: float = 0.4
     pred_weight: float = 1.0
@@ -88,6 +92,7 @@ class StageATrainer:
             slot_iters=config.slot_iters,
             sinkhorn_iters=config.sinkhorn_iters,
             decoder_hidden=config.decoder_hidden,
+            use_checkpointing=config.use_checkpointing,
         )
         self.optim: torch.optim.Optimizer | None = None
         self.step = 0

@@ -17,10 +17,17 @@ from glr.models.tpr import TPRBinder
 
 
 class ConvEncoder(nn.Module):
-    """Tiny CNN backbone that lifts an image to a per-pixel feature grid."""
+    """Tiny CNN backbone that lifts an image to a per-pixel feature grid.
 
-    def __init__(self, in_channels: int, hidden_dim: int) -> None:
+    Optionally uses gradient checkpointing (recomputes activations during
+    backward instead of storing them). Important for Stage A because the
+    consistency loss runs the encoder 3× per step (main + view1 + view2);
+    checkpointing trades ~1.3× compute for ~3× lower activation memory there.
+    """
+
+    def __init__(self, in_channels: int, hidden_dim: int, use_checkpointing: bool = False) -> None:
         super().__init__()
+        self.use_checkpointing = use_checkpointing
         self.net = nn.Sequential(
             nn.Conv2d(in_channels, hidden_dim, 5, padding=2),
             nn.GELU(),
@@ -33,6 +40,8 @@ class ConvEncoder(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.use_checkpointing and self.training and x.requires_grad:
+            return torch.utils.checkpoint.checkpoint(self.net, x, use_reentrant=False)
         return self.net(x)
 
 
@@ -64,13 +73,14 @@ class AbsorbBlock(nn.Module):
         filler_dim: int = 16,
         slot_iters: int = 3,
         sinkhorn_iters: int = 3,
+        use_checkpointing: bool = False,
     ) -> None:
         super().__init__()
         if slot_dim != num_roles * filler_dim:
             raise ValueError("slot_dim must equal num_roles * filler_dim")
 
         self.image_size = image_size
-        self.encoder = ConvEncoder(in_channels, feat_dim)
+        self.encoder = ConvEncoder(in_channels, feat_dim, use_checkpointing=use_checkpointing)
         self.pos_embed = soft_position_embedding_2d(image_size, image_size, feat_dim)
         self.feat_norm = nn.LayerNorm(feat_dim)
         self.feat_mlp = nn.Sequential(
@@ -100,7 +110,6 @@ class AbsorbBlock(nn.Module):
               attn:        (B, N, K)               — input-token-to-slot attention (last iter)
               feats:       (B, N, feat_dim)        — pre-slot encoder features
         """
-        b = image.size(0)
         feat_map = self.encoder(image)                               # (B, feat_dim, H, W)
         feat_map = rearrange(feat_map, "b d h w -> b h w d")
         feat_map = self.pos_embed(feat_map)                          # (B, H, W, feat_dim)

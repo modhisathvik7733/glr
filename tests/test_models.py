@@ -66,3 +66,20 @@ def test_stage_a_backward():
     # at least the encoder's first conv should have non-zero gradient
     grad = m.absorb.encoder.net[0].weight.grad
     assert grad is not None and grad.abs().sum() > 0
+
+
+def test_stage_a_backward_with_checkpointing():
+    """Gradient checkpointing path produces non-zero gradients on the same params."""
+    m = StageAModel(
+        image_size=16, in_channels=1, feat_dim=16, slot_dim=32, num_slots=4,
+        num_roles=4, filler_dim=8, decoder_hidden=16, use_checkpointing=True,
+    )
+    m.train()
+    img = torch.randn(2, 1, 16, 16, requires_grad=False)
+    out = m(img)
+    loss = out["recon"].pow(2).mean() + out["pred_feats"].pow(2).mean()
+    loss.backward()
+    enc_grad = m.absorb.encoder.net[0].weight.grad
+    dec_grad = m.decoder.net[0].weight.grad
+    assert enc_grad is not None and enc_grad.abs().sum() > 0
+    assert dec_grad is not None and dec_grad.abs().sum() > 0

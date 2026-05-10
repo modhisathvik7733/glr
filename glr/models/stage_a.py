@@ -26,7 +26,14 @@ from glr.models.slot_attention import soft_position_embedding_2d
 
 
 class SpatialBroadcastDecoder(nn.Module):
-    """Decode each slot independently onto a spatial grid, then mix via alpha softmax."""
+    """Decode each slot independently onto a spatial grid, then mix via alpha softmax.
+
+    Memory note: this is the heaviest activation source in the model — every
+    slot is broadcast to a full HxW grid before the conv stack, so activations
+    grow as `B × K × hidden_dim × H × W`. With plan-spec K=64, d=512, H=W=64
+    on a 32GB card you must use `use_checkpointing=True`, which trades ~1.3×
+    compute for ~3-4× lower decoder activation memory.
+    """
 
     def __init__(
         self,
@@ -34,10 +41,12 @@ class SpatialBroadcastDecoder(nn.Module):
         out_channels: int,
         image_size: int,
         hidden_dim: int = 64,
+        use_checkpointing: bool = False,
     ) -> None:
         super().__init__()
         self.image_size = image_size
         self.slot_dim = slot_dim
+        self.use_checkpointing = use_checkpointing
         self.pos_embed = soft_position_embedding_2d(image_size, image_size, slot_dim)
         # tiny conv-decoder; outputs out_channels + 1 alpha per pixel per slot
         self.net = nn.Sequential(
@@ -58,16 +67,19 @@ class SpatialBroadcastDecoder(nn.Module):
         masks:           (B, K, 1, H, W)
         per_slot_recon:  (B, K, C, H, W)
         """
-        b, k, d = slots.shape
+        b, k, _ = slots.shape
         h = w = self.image_size
         # broadcast each slot to a (H, W) feature plane
         broadcast = repeat(slots, "b k d -> (b k) d h w", h=h, w=w)
-        # add position embedding (note pos_embed expects (B, H, W, D))
+        # add position embedding (pos_embed expects (B, H, W, D))
         broadcast = rearrange(broadcast, "bk d h w -> bk h w d")
         broadcast = self.pos_embed(broadcast)
         broadcast = rearrange(broadcast, "bk h w d -> bk d h w")
 
-        out = self.net(broadcast)
+        if self.use_checkpointing and self.training and broadcast.requires_grad:
+            out = torch.utils.checkpoint.checkpoint(self.net, broadcast, use_reentrant=False)
+        else:
+            out = self.net(broadcast)
         out = rearrange(out, "(b k) c h w -> b k c h w", b=b, k=k)
         rgb, alpha = out[:, :, : self.out_channels], out[:, :, self.out_channels : self.out_channels + 1]
         masks = alpha.softmax(dim=1)
@@ -120,6 +132,7 @@ class StageAModel(nn.Module):
         slot_iters: int = 3,
         sinkhorn_iters: int = 3,
         decoder_hidden: int = 64,
+        use_checkpointing: bool = False,
     ) -> None:
         super().__init__()
         self.absorb = AbsorbBlock(
@@ -132,12 +145,14 @@ class StageAModel(nn.Module):
             filler_dim=filler_dim,
             slot_iters=slot_iters,
             sinkhorn_iters=sinkhorn_iters,
+            use_checkpointing=use_checkpointing,
         )
         self.decoder = SpatialBroadcastDecoder(
             slot_dim=slot_dim,
             out_channels=in_channels,
             image_size=image_size,
             hidden_dim=decoder_hidden,
+            use_checkpointing=use_checkpointing,
         )
         self.masked_pred = MaskedPredictionHead(slot_dim, feat_dim)
         self.config = dict(
