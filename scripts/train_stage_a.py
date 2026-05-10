@@ -85,13 +85,20 @@ def main() -> None:
     print(f"[device] {device}")
 
     train_ds, held_out_pairs = build_dataset(cfg)
+    n_workers = cfg["data"]["num_workers"]
     train_loader = DataLoader(
         train_ds,
         batch_size=cfg["data"]["batch_size"],
         shuffle=True,
-        num_workers=cfg["data"]["num_workers"],
+        num_workers=n_workers,
         pin_memory=(device.type == "cuda"),
         drop_last=True,
+        # persistent_workers keeps the workers alive across epochs (saves
+        # ~3-5 sec per epoch boundary, big deal on small datasets).
+        persistent_workers=(n_workers > 0),
+        # prefetch_factor=4: each worker buffers 4 batches ahead. At small
+        # batch sizes this hides any data-loader latency from the GPU.
+        prefetch_factor=4 if n_workers > 0 else None,
     )
 
     # eval split: a separate (small) subset for periodic gate checks
@@ -135,6 +142,8 @@ def main() -> None:
         eval_every=cfg["training"]["eval_every"],
         use_amp=cfg["training"].get("use_amp", True),
         use_checkpointing=cfg["training"].get("use_checkpointing", False),
+        use_compile=cfg["training"].get("use_compile", True),
+        compile_mode=cfg["training"].get("compile_mode", "default"),
         use_wandb=cfg.get("wandb", {}).get("enabled", False),
         wandb_project=cfg.get("wandb", {}).get("project", "glr-stage-a"),
         wandb_run_name=cfg.get("wandb", {}).get("run_name") or f"seed{cfg['seed']}",
