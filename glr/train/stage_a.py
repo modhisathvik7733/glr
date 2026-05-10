@@ -28,6 +28,7 @@ from glr.data.masking import apply_image_mask, random_token_mask
 from glr.losses import masked_prediction_loss, slot_consistency_loss, vicreg_loss
 from glr.losses.consistency import slot_usage_balance_loss
 from glr.models import StageAModel
+from glr.utils.memory import env_debug_enabled, mem_snapshot, mem_track, reset_peak
 
 
 @dataclass
@@ -146,12 +147,23 @@ class StageATrainer:
             pg["lr"] = self._lr(self.step)
         aux_scale = self._aux_scale(self.step)
 
+        # Memory-debug switch. Enabled per-step at low cost; only the first
+        # few steps print full traces. Set GLR_DEBUG_MEMORY=1 to enable.
+        debug_mem = env_debug_enabled() and self.step < 3
+        if debug_mem:
+            reset_peak()
+            print(f"\n=== step {self.step} memory trace ===")
+            print(f"[mem] step start                                  {mem_snapshot()}")
+
         image = batch["image"].to(device)
         view1 = batch.get("view1")
         view2 = batch.get("view2")
         if view1 is not None:
             view1 = view1.to(device)
             view2 = view2.to(device)
+
+        if debug_mem:
+            print(f"[mem] after batch->device                         {mem_snapshot()}")
 
         # --- masking ---
         n_patches = (cfg.image_size // cfg.patch_size) ** 2
@@ -163,43 +175,40 @@ class StageATrainer:
         autocast_ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=amp_enabled)
 
         with autocast_ctx:
-            # --- target features for masked prediction (no_grad inside) ---
-            target_feats = self._compute_target_features(image)
+            with mem_track("target_feats (no_grad)", enabled=debug_mem):
+                target_feats = self._compute_target_features(image)
 
-            # --- forward ---
-            out_main = self.model(image_masked)
+            with mem_track("main forward (model)", enabled=debug_mem):
+                out_main = self.model(image_masked)
 
-            # masked-prediction loss
-            ph = cfg.image_size // cfg.patch_size
-            mask_pixel = (
-                mask.view(image.size(0), ph, ph)
-                .repeat_interleave(cfg.patch_size, dim=1)
-                .repeat_interleave(cfg.patch_size, dim=2)
-                .reshape(image.size(0), cfg.image_size * cfg.image_size)
-            )
-            loss_pred = masked_prediction_loss(out_main["pred_feats"], target_feats, mask_pixel)
-
-            # reconstruction loss
-            loss_recon = F.mse_loss(out_main["recon"], image)
-
-            # VICReg on slot contents — compute in fp32 to keep variance/cov stats numerically safe
-            with torch.autocast(device_type="cuda", enabled=False):
-                vic = vicreg_loss(
-                    out_main["slots"].float(),
-                    var_weight=cfg.vicreg_var_weight,
-                    cov_weight=cfg.vicreg_cov_weight,
+            with mem_track("losses: pred + recon + vic + balance", enabled=debug_mem):
+                ph = cfg.image_size // cfg.patch_size
+                mask_pixel = (
+                    mask.view(image.size(0), ph, ph)
+                    .repeat_interleave(cfg.patch_size, dim=1)
+                    .repeat_interleave(cfg.patch_size, dim=2)
+                    .reshape(image.size(0), cfg.image_size * cfg.image_size)
                 )
+                loss_pred = masked_prediction_loss(out_main["pred_feats"], target_feats, mask_pixel)
 
-            # slot-usage balance
-            loss_balance = slot_usage_balance_loss(out_main["attn"])
+                loss_recon = F.mse_loss(out_main["recon"], image)
 
-            # consistency (only if two views provided)
-            if view1 is not None and view2 is not None:
-                out_a = self.model.absorb(view1)
-                out_b = self.model.absorb(view2)
-                loss_consistency = slot_consistency_loss(out_a["slots"], out_b["slots"])
-            else:
-                loss_consistency = image.new_zeros(())
+                with torch.autocast(device_type="cuda", enabled=False):
+                    vic = vicreg_loss(
+                        out_main["slots"].float(),
+                        var_weight=cfg.vicreg_var_weight,
+                        cov_weight=cfg.vicreg_cov_weight,
+                    )
+
+                loss_balance = slot_usage_balance_loss(out_main["attn"])
+
+            with mem_track("consistency (2x absorb on views)", enabled=debug_mem):
+                if view1 is not None and view2 is not None:
+                    out_a = self.model.absorb(view1)
+                    out_b = self.model.absorb(view2)
+                    loss_consistency = slot_consistency_loss(out_a["slots"], out_b["slots"])
+                else:
+                    loss_consistency = image.new_zeros(())
 
             total = (
                 loss_recon
@@ -209,10 +218,19 @@ class StageATrainer:
                 + aux_scale * cfg.consistency_weight * loss_consistency
             )
 
-        self.optim.zero_grad(set_to_none=True)
-        total.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.grad_clip)
-        self.optim.step()
+        if debug_mem:
+            print(f"[mem] before backward                             {mem_snapshot()}")
+
+        with mem_track("backward", enabled=debug_mem):
+            self.optim.zero_grad(set_to_none=True)
+            total.backward()
+
+        with mem_track("optim.step + clip", enabled=debug_mem):
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.grad_clip)
+            self.optim.step()
+
+        if debug_mem:
+            print(f"[mem] step end                                    {mem_snapshot()}")
 
         log = {
             "step": float(self.step),
