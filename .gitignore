@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.python-version
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Datasets (large; download separately)
+data/raw/
+data/cache/
+*.npz
+*.h5
+*.hdf5
+*.tar.gz
+*.zip
+
+# Outputs
+outputs/
+runs/
+checkpoints/
+wandb/
+*.pt
+*.pth
+*.ckpt
+
+# Logs
+logs/
+*.log
+
+# Notebooks
+.ipynb_checkpoints/
+*.ipynb
+
+# Local config
+.env
+.env.local
+config.local.yaml

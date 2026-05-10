@@ -1,0 +1,50 @@
+# Stage A — Concept Physics on dSprites / synthetic factor data.
+# Sized to fit a single A100 80GB; tune up batch size if memory allows.
+
+seed: 0
+device: cuda  # or cpu / mps
+out_dir: outputs/stage_a
+
+data:
+  source: dsprites          # dsprites | synthetic
+  root: data/raw            # location of dsprites_*.npz if source=dsprites
+  image_size: 64
+  in_channels: 1
+  batch_size: 256
+  num_workers: 4
+  two_view: true
+  held_out_count: 4         # number of (shape, scale) tuples to exclude from training
+  held_out_keys: [shape, scale]
+
+model:
+  feat_dim: 64
+  slot_dim: 128
+  num_slots: 8
+  num_roles: 8
+  filler_dim: 16
+  slot_iters: 3
+  sinkhorn_iters: 3
+  decoder_hidden: 64
+
+training:
+  lr: 5.0e-4
+  weight_decay: 0.1
+  betas: [0.9, 0.95]
+  grad_clip: 1.0
+  warmup_steps: 500
+  total_steps: 20000
+  aux_warmup_frac: 0.05
+  patch_size: 8
+  mask_ratio: 0.4
+  pred_weight: 1.0
+  vicreg_var_weight: 1.0
+  vicreg_cov_weight: 0.04
+  vicreg_total_weight: 0.5
+  consistency_weight: 0.3
+  usage_balance_weight: 0.1
+  log_every: 50
+  eval_every: 1000
+
+eval:
+  n_eval_samples: 2048
+  factors_to_probe: [shape, scale, orientation, pos_x, pos_y]

@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "glr"
+version = "0.0.1"
+description = "Grounded Latent Reasoner — Stage A: concept emergence on synthetic visual factors"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Sathvik Modhi" }]
+dependencies = [
+    "torch>=2.2",
+    "numpy>=1.26",
+    "pyyaml>=6.0",
+    "tqdm>=4.66",
+    "scikit-learn>=1.4",
+    "einops>=0.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+data = [
+    "h5py>=3.10",
+    "pillow>=10.0",
+    "requests>=2.31",
+]
+viz = [
+    "matplotlib>=3.8",
+]
+
+[tool.setuptools.packages.find]
+include = ["glr*"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]
