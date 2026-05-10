@@ -44,6 +44,7 @@ training:
   usage_balance_weight: 0.1
   log_every: 50
   eval_every: 1000
+  use_amp: true
 
 eval:
   n_eval_samples: 2048

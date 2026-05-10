@@ -53,6 +53,10 @@ class StageATrainerConfig:
     warmup_steps: int = 500
     total_steps: int = 20_000
     aux_warmup_frac: float = 0.05  # auxiliary losses ramp in over the first 5%
+    # mixed precision — bfloat16 autocast on CUDA. bf16 needs no GradScaler.
+    # Roughly halves activation memory and uses tensor cores; recommended on
+    # any Ampere+ / RTX 30+ / RTX 40+ / RTX 50+ card.
+    use_amp: bool = True
     # masked prediction
     mask_ratio: float = 0.4
     pred_weight: float = 1.0
@@ -149,54 +153,56 @@ class StageATrainer:
         mask = random_token_mask(image.size(0), n_patches, cfg.mask_ratio, device=device)
         image_masked = apply_image_mask(image, mask, cfg.patch_size)
 
-        # --- target features for masked prediction ---
-        target_feats = self._compute_target_features(image)  # uses un-masked image
+        # bf16 autocast over the heavy compute. Keeps optimizer/master weights in fp32.
+        amp_enabled = bool(cfg.use_amp) and device.type == "cuda"
+        autocast_ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=amp_enabled)
 
-        # --- forward ---
-        out_main = self.model(image_masked)
+        with autocast_ctx:
+            # --- target features for masked prediction (no_grad inside) ---
+            target_feats = self._compute_target_features(image)
 
-        # masked-prediction loss: only at masked patch positions, but in the model's
-        # token grid (HxW per pixel, not per patch). Convert patch-mask to per-pixel
-        # mask and downsample to encoder grid.
-        # Encoder is full-res (no patchify), so target_feats has H*W tokens. We map
-        # the patch-level mask to the H*W grid by repeat_interleave.
-        ph = cfg.image_size // cfg.patch_size
-        mask_pixel = (
-            mask.view(image.size(0), ph, ph)
-            .repeat_interleave(cfg.patch_size, dim=1)
-            .repeat_interleave(cfg.patch_size, dim=2)
-            .reshape(image.size(0), cfg.image_size * cfg.image_size)
-        )
-        loss_pred = masked_prediction_loss(out_main["pred_feats"], target_feats, mask_pixel)
+            # --- forward ---
+            out_main = self.model(image_masked)
 
-        # reconstruction loss: model should predict the *un-masked* image even from masked input
-        loss_recon = F.mse_loss(out_main["recon"], image)
+            # masked-prediction loss
+            ph = cfg.image_size // cfg.patch_size
+            mask_pixel = (
+                mask.view(image.size(0), ph, ph)
+                .repeat_interleave(cfg.patch_size, dim=1)
+                .repeat_interleave(cfg.patch_size, dim=2)
+                .reshape(image.size(0), cfg.image_size * cfg.image_size)
+            )
+            loss_pred = masked_prediction_loss(out_main["pred_feats"], target_feats, mask_pixel)
 
-        # VICReg on slot contents
-        vic = vicreg_loss(
-            out_main["slots"],
-            var_weight=cfg.vicreg_var_weight,
-            cov_weight=cfg.vicreg_cov_weight,
-        )
+            # reconstruction loss
+            loss_recon = F.mse_loss(out_main["recon"], image)
 
-        # slot-usage balance
-        loss_balance = slot_usage_balance_loss(out_main["attn"])
+            # VICReg on slot contents — compute in fp32 to keep variance/cov stats numerically safe
+            with torch.autocast(device_type="cuda", enabled=False):
+                vic = vicreg_loss(
+                    out_main["slots"].float(),
+                    var_weight=cfg.vicreg_var_weight,
+                    cov_weight=cfg.vicreg_cov_weight,
+                )
 
-        # consistency (only if two views provided)
-        if view1 is not None and view2 is not None:
-            out_a = self.model.absorb(view1)
-            out_b = self.model.absorb(view2)
-            loss_consistency = slot_consistency_loss(out_a["slots"], out_b["slots"])
-        else:
-            loss_consistency = image.new_zeros(())
+            # slot-usage balance
+            loss_balance = slot_usage_balance_loss(out_main["attn"])
 
-        total = (
-            loss_recon
-            + cfg.pred_weight * loss_pred
-            + aux_scale * cfg.vicreg_total_weight * vic["total"]
-            + aux_scale * cfg.usage_balance_weight * loss_balance
-            + aux_scale * cfg.consistency_weight * loss_consistency
-        )
+            # consistency (only if two views provided)
+            if view1 is not None and view2 is not None:
+                out_a = self.model.absorb(view1)
+                out_b = self.model.absorb(view2)
+                loss_consistency = slot_consistency_loss(out_a["slots"], out_b["slots"])
+            else:
+                loss_consistency = image.new_zeros(())
+
+            total = (
+                loss_recon
+                + cfg.pred_weight * loss_pred
+                + aux_scale * cfg.vicreg_total_weight * vic["total"]
+                + aux_scale * cfg.usage_balance_weight * loss_balance
+                + aux_scale * cfg.consistency_weight * loss_consistency
+            )
 
         self.optim.zero_grad(set_to_none=True)
         total.backward()

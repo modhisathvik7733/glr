@@ -7,7 +7,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
 import torch
@@ -46,7 +45,9 @@ def build_dataset(cfg: dict) -> tuple[torch.utils.data.Dataset, list[tuple[int, 
     return ds, held_out
 
 
-def make_eval_fn(eval_loader: DataLoader, factor_names: list[str], device: torch.device):
+def make_eval_fn(eval_loader: DataLoader, device: torch.device):
+    factor_names = list(DSPRITES_FACTORS)
+
     def eval_fn(model) -> dict[str, float]:
         model.eval()
         feats, latents = [], []
@@ -57,13 +58,12 @@ def make_eval_fn(eval_loader: DataLoader, factor_names: list[str], device: torch
                 latents.append(batch["latents"])
         feats = torch.cat(feats)
         latents = torch.cat(latents)
-        # train probe on first half, test on second
         n = feats.size(0)
         cut = n // 2
         train_feat, test_feat = feats[:cut], feats[cut:]
         train_lat, test_lat = latents[:cut], latents[cut:]
-        probe_acc = probe_all_factors(train_feat, train_lat, test_feat, test_lat, list(DSPRITES_FACTORS))
-        mig = mutual_information_gap(feats, latents, factor_names=list(DSPRITES_FACTORS))
+        probe_acc = probe_all_factors(train_feat, train_lat, test_feat, test_lat, factor_names)
+        mig = mutual_information_gap(feats, latents, factor_names=factor_names)
         return {
             "probe": {k: round(v, 3) for k, v in probe_acc.items()},
             "mig": round(mig["mig"], 3),
@@ -131,13 +131,14 @@ def main() -> None:
         usage_balance_weight=cfg["training"]["usage_balance_weight"],
         log_every=cfg["training"]["log_every"],
         eval_every=cfg["training"]["eval_every"],
+        use_amp=cfg["training"].get("use_amp", True),
         out_dir=cfg["out_dir"],
         seed=cfg["seed"],
     )
 
     trainer = StageATrainer(train_cfg)
     print(f"[model] params: {trainer.model.n_params() / 1e6:.2f}M")
-    eval_fn = make_eval_fn(eval_loader, list(DSPRITES_FACTORS), device)
+    eval_fn = make_eval_fn(eval_loader, device)
 
     trainer.fit(train_loader, device=device, eval_fn=eval_fn)
 
