@@ -1,0 +1,78 @@
+# Stage A — Minimum Viable Curriculum smoke test.
+#
+# Purpose: in 5–10 minutes on any modern GPU, validate that the architecture
+# (slot attention + TPR + JEPA + VICReg + consistency) can recover the 5
+# generative factors of a tiny synthetic dataset. If it can't here, no point
+# burning hours on the full Stage A run.
+#
+# This is a FALSIFICATION TEST, not a production run.
+#   - dataset:  synthetic (procedurally generated; no download needed)
+#   - model:    ~1M params (vs 33M in full Stage A)
+#   - steps:    1000 (vs 10000)
+#   - eval:     1024 samples × 5 factors → probe + MIG
+#
+# Expected pass criteria (see scripts/run_mvc.sh):
+#   - probe accuracy averaged across factors > 0.5 (random ≈ 0.05–0.3)
+#   - MIG > 0.10 (random ≈ 0)
+#   - recon < 0.05 by step 1000
+#
+# If those hold, the architecture works on the easy case. Time to invest in
+# the full run.
+
+seed: 0
+device: cuda
+out_dir: outputs/stage_a_mvc
+
+data:
+  source: synthetic         # SyntheticFactorDataset, in-memory, no .npz needed
+  root: data/raw            # ignored for synthetic
+  image_size: 64
+  in_channels: 1
+  batch_size: 64
+  num_workers: 2
+  two_view: true
+  held_out_count: 4
+  held_out_keys: [shape, scale]
+
+model:
+  feat_dim: 64
+  slot_dim: 128             # = num_roles(8) * filler_dim(16)
+  num_slots: 8              # 5 factors + a few buffer slots
+  num_roles: 8
+  filler_dim: 16
+  slot_iters: 3
+  sinkhorn_iters: 3
+  decoder_type: token
+  decoder_hidden: 128
+  decoder_layers: 2
+
+training:
+  lr: 3.0e-4
+  weight_decay: 0.1
+  betas: [0.9, 0.95]
+  grad_clip: 0.5
+  warmup_steps: 200
+  total_steps: 1000
+  aux_warmup_frac: 0.1      # aux losses fully on by step 100
+  patch_size: 8
+  mask_ratio: 0.4
+  pred_weight: 1.0
+  vicreg_var_weight: 0.5
+  vicreg_cov_weight: 0.2
+  vicreg_total_weight: 0.5
+  consistency_weight: 0.3
+  usage_balance_weight: 0.1
+  log_every: 50
+  eval_every: 500
+  use_amp: true
+  use_compile: false        # MVC is short; compile warmup would dominate runtime
+
+eval:
+  n_eval_samples: 1024
+  factors_to_probe: [shape, scale, orientation, pos_x, pos_y]
+
+wandb:
+  enabled: false
+  project: glr-stage-a-mvc
+  run_name: null
+  tags: [mvc]

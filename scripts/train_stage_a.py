@@ -77,9 +77,15 @@ def main() -> None:
     parser.add_argument("--config", default="configs/stage_a.yaml")
     parser.add_argument("--device", default=None)
     parser.add_argument("--steps", type=int, default=None, help="Override total_steps.")
+    parser.add_argument("--seed", type=int, default=None, help="Override seed.")
+    parser.add_argument("--out-dir", default=None, help="Override out_dir.")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if args.seed is not None:
+        cfg["seed"] = args.seed
+    if args.out_dir is not None:
+        cfg["out_dir"] = args.out_dir
     seed_all(cfg["seed"])
     device = torch.device(args.device or cfg.get("device", "cpu"))
     print(f"[device] {device}")
