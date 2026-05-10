@@ -12,7 +12,7 @@ data:
   image_size: 64
   in_channels: 1
   batch_size: 64            # safe with token decoder; tune up if VRAM allows
-  num_workers: 4
+  num_workers: 2            # 32 GB RAM box: each fork pseudo-copies the dataset (COW broken by Python refcounts), so keep workers low
   two_view: true
   held_out_count: 4         # number of (shape, scale) tuples to exclude from training
   held_out_keys: [shape, scale]

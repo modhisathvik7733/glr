@@ -54,7 +54,10 @@ class DSpritesDataset(Dataset):
                 f"  curl -L {DSPRITES_URL} -o {path}"
             )
         data = np.load(path, allow_pickle=True, encoding="latin1")
-        imgs = data["imgs"].astype(np.float32)            # (N, 64, 64) in {0,1}
+        # Keep imgs as uint8 (0/1) — 4x smaller than float32 in RAM (2.3 GB vs 9.4 GB
+        # for the full 573k set). Each DataLoader worker would otherwise hold its
+        # own COW-broken copy at 9.4 GB and OOM a 32 GB box during eval.
+        imgs = data["imgs"].astype(np.uint8)              # (N, 64, 64) in {0,1}
         latents = data["latents_classes"].astype(np.int64)  # (N, 6)
         # latents_classes columns match DSPRITES_FACTORS
 
@@ -90,7 +93,8 @@ class DSpritesDataset(Dataset):
         return out
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        img = self.imgs[idx]                             # (64, 64) in [0, 1]
+        # Convert per-sample from uint8 → float32 (cheap; saves RAM at dataset scale).
+        img = self.imgs[idx].astype(np.float32)          # (64, 64) in [0, 1]
         latents = self.latents[idx]
         if self.two_view:
             rng = np.random.default_rng(np.random.randint(0, 2**31 - 1))

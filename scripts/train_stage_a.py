@@ -102,9 +102,10 @@ def main() -> None:
         # persistent_workers keeps the workers alive across epochs (saves
         # ~3-5 sec per epoch boundary, big deal on small datasets).
         persistent_workers=(n_workers > 0),
-        # prefetch_factor=4: each worker buffers 4 batches ahead. At small
-        # batch sizes this hides any data-loader latency from the GPU.
-        prefetch_factor=4 if n_workers > 0 else None,
+        # prefetch_factor=2: each worker buffers 2 batches ahead. Down from 4
+        # to bound peak RAM usage on 32 GB boxes (each buffered batch is a
+        # full COW-broken dataset copy in worker memory).
+        prefetch_factor=2 if n_workers > 0 else None,
     )
 
     # eval split: a separate (small) subset for periodic gate checks
@@ -118,11 +119,13 @@ def main() -> None:
     # model graph hits the cache on eval too. With mismatched shapes torch.compile
     # silently recompiles the eval-mode forward, producing the multi-minute pause
     # observed at step 2000.
+    # num_workers=0: eval runs in main process. Fork-copying the dataset to extra
+    # workers at step `eval_every` was the OOM trigger on the 32 GB box.
     eval_loader = DataLoader(
         eval_ds,
         batch_size=cfg["data"]["batch_size"],
         shuffle=False,
-        num_workers=2,
+        num_workers=0,
         drop_last=True,
     )
 

@@ -381,5 +381,19 @@ class StageATrainer:
                         else:
                             flat[f"eval/{k}"] = float(v)
                     self._wandb_log(flat, step=self.step)
+
+                    # Periodic checkpoint to survive OOM kills. Single rolling file
+                    # so disk usage stays bounded; final.pt is still written at the
+                    # end of fit() by the caller.
+                    ckpt_path = Path(self.config.out_dir) / "latest.pt"
+                    torch.save(
+                        {
+                            "step": self.step,
+                            "model": self.model.state_dict(),
+                            "optim": self.optim.state_dict() if self.optim else None,
+                            "config": self.config.__dict__,
+                        },
+                        ckpt_path,
+                    )
         finally:
             self._wandb_finish()
