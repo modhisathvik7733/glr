@@ -270,10 +270,17 @@ class StageATrainer:
                 loss_recon = F.mse_loss(out_main["recon"], image)
 
                 with torch.autocast(device_type="cuda", enabled=False):
+                    # target_std=0.1 (not 1.0): with LayerNorm on slot output,
+                    # batch-axis per-feature std is naturally bounded around
+                    # 1/sqrt(D) ≈ 0.04. target_std=1.0 is unreachable and the
+                    # hinge fires forever, fighting the predictor. 0.1 is
+                    # achievable, so the loss self-deactivates once slots are
+                    # diverse enough — anti-collapse only when needed.
                     vic = vicreg_loss(
                         out_main["slots"].float(),
                         var_weight=cfg.vicreg_var_weight,
                         cov_weight=cfg.vicreg_cov_weight,
+                        target_std=0.1,
                     )
 
                 loss_balance = slot_usage_balance_loss(out_main["attn"])

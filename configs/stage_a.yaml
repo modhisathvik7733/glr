@@ -40,7 +40,7 @@ training:
   patch_size: 8
   mask_ratio: 0.4
   pred_weight: 1.0
-  vicreg_var_weight: 0.0
+  vicreg_var_weight: 0.5
   vicreg_cov_weight: 0.2
   vicreg_total_weight: 0.5
   consistency_weight: 0.3
