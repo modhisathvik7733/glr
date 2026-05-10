@@ -135,6 +135,10 @@ def main() -> None:
         eval_every=cfg["training"]["eval_every"],
         use_amp=cfg["training"].get("use_amp", True),
         use_checkpointing=cfg["training"].get("use_checkpointing", False),
+        use_wandb=cfg.get("wandb", {}).get("enabled", False),
+        wandb_project=cfg.get("wandb", {}).get("project", "glr-stage-a"),
+        wandb_run_name=cfg.get("wandb", {}).get("run_name") or f"seed{cfg['seed']}",
+        wandb_tags=tuple(cfg.get("wandb", {}).get("tags", [])),
         out_dir=cfg["out_dir"],
         seed=cfg["seed"],
     )

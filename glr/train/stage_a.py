@@ -79,6 +79,13 @@ class StageATrainerConfig:
     log_every: int = 50
     out_dir: str = "outputs/stage_a"
     seed: int = 0
+    # Weights & Biases. Activates when use_wandb=True AND WANDB_API_KEY is set
+    # in the env (or the user has run `wandb login` previously). All scalar
+    # metrics from the training step + eval are logged.
+    use_wandb: bool = False
+    wandb_project: str = "glr-stage-a"
+    wandb_run_name: str | None = None       # default: f"seed{seed}"
+    wandb_tags: tuple[str, ...] = ()
 
 
 class StageATrainer:
@@ -109,6 +116,9 @@ class StageATrainer:
         self.step = 0
         self.history: list[dict[str, float]] = []
         Path(config.out_dir).mkdir(parents=True, exist_ok=True)
+        # W&B: lazy init on first step (so model param count etc. is available)
+        self._wandb = None
+        self._wandb_initialized = False
 
     # ---- learning rate ----
     def _lr(self, step: int) -> float:
@@ -124,6 +134,49 @@ class StageATrainer:
     def _aux_scale(self, step: int) -> float:
         warm = max(int(self.config.aux_warmup_frac * self.config.total_steps), 1)
         return min(step / warm, 1.0)
+
+    # ---- W&B (lazy, optional) ----
+    def _maybe_init_wandb(self) -> None:
+        """Initialize a W&B run if configured. Idempotent."""
+        if self._wandb_initialized or not self.config.use_wandb:
+            return
+        self._wandb_initialized = True
+        try:
+            import wandb  # local import: only required when use_wandb=True
+        except ImportError:
+            print("[wandb] not installed; skipping. `pip install wandb` to enable.")
+            return
+        run_name = self.config.wandb_run_name or f"seed{self.config.seed}"
+        try:
+            self._wandb = wandb.init(
+                project=self.config.wandb_project,
+                name=run_name,
+                tags=list(self.config.wandb_tags) if self.config.wandb_tags else None,
+                config={k: v for k, v in self.config.__dict__.items() if not k.startswith("_")},
+                reinit="finish_previous",
+            )
+            n_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+            self._wandb.summary["model/n_params"] = int(n_params)
+            print(f"[wandb] logging to project={self.config.wandb_project} run={run_name}")
+        except Exception as e:  # auth, network, anything
+            print(f"[wandb] init failed ({e}); continuing without W&B.")
+            self._wandb = None
+
+    def _wandb_log(self, payload: dict, step: int) -> None:
+        if self._wandb is not None:
+            try:
+                self._wandb.log(payload, step=step)
+            except Exception as e:  # never let W&B break training
+                print(f"[wandb] log failed ({e}); disabling.")
+                self._wandb = None
+
+    def _wandb_finish(self) -> None:
+        if self._wandb is not None:
+            try:
+                self._wandb.finish()
+            except Exception:
+                pass
+            self._wandb = None
 
     # ---- core step ----
     def _make_optim(self) -> None:
@@ -266,32 +319,47 @@ class StageATrainer:
     ) -> None:
         self.model.to(device)
         self._make_optim()
+        self._maybe_init_wandb()
         t0 = time.time()
         train_iter = iter(train_loader)
-        while self.step < self.config.total_steps:
-            try:
-                batch = next(train_iter)
-            except StopIteration:
-                train_iter = iter(train_loader)
-                batch = next(train_iter)
+        try:
+            while self.step < self.config.total_steps:
+                try:
+                    batch = next(train_iter)
+                except StopIteration:
+                    train_iter = iter(train_loader)
+                    batch = next(train_iter)
 
-            log = self.step_batch(batch, device)
-            self.history.append(log)
+                log = self.step_batch(batch, device)
+                self.history.append(log)
+                self._wandb_log(log, step=self.step)
 
-            if self.step % self.config.log_every == 0:
-                tps = (self.step + 1) / max(time.time() - t0, 1e-6)
-                print(
-                    f"[step {self.step:6d}] "
-                    f"loss={log['loss/total']:.4f} "
-                    f"recon={log['loss/recon']:.4f} "
-                    f"pred={log['loss/pred']:.4f} "
-                    f"vic={log['loss/vic_var']:.3f}/{log['loss/vic_cov']:.3f} "
-                    f"bal={log['loss/balance']:.3f} "
-                    f"cons={log['loss/consistency']:.3f} "
-                    f"lr={log['lr']:.2e} "
-                    f"({tps:.1f} steps/s)"
-                )
+                if self.step % self.config.log_every == 0:
+                    tps = (self.step + 1) / max(time.time() - t0, 1e-6)
+                    print(
+                        f"[step {self.step:6d}] "
+                        f"loss={log['loss/total']:.4f} "
+                        f"recon={log['loss/recon']:.4f} "
+                        f"pred={log['loss/pred']:.4f} "
+                        f"vic={log['loss/vic_var']:.3f}/{log['loss/vic_cov']:.3f} "
+                        f"bal={log['loss/balance']:.3f} "
+                        f"cons={log['loss/consistency']:.3f} "
+                        f"lr={log['lr']:.2e} "
+                        f"({tps:.1f} steps/s)"
+                    )
+                    self._wandb_log({"perf/steps_per_sec": float(tps)}, step=self.step)
 
-            if eval_fn is not None and self.step % self.config.eval_every == 0:
-                eval_log = eval_fn(self.model)
-                print(f"[step {self.step:6d}] eval: {eval_log}")
+                if eval_fn is not None and self.step % self.config.eval_every == 0:
+                    eval_log = eval_fn(self.model)
+                    print(f"[step {self.step:6d}] eval: {eval_log}")
+                    # flatten eval dict into "eval/<name>" keys for W&B
+                    flat: dict[str, float] = {}
+                    for k, v in eval_log.items():
+                        if isinstance(v, dict):
+                            for sk, sv in v.items():
+                                flat[f"eval/{k}/{sk}"] = float(sv)
+                        else:
+                            flat[f"eval/{k}"] = float(v)
+                    self._wandb_log(flat, step=self.step)
+        finally:
+            self._wandb_finish()

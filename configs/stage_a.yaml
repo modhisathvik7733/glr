@@ -52,3 +52,11 @@ training:
 eval:
   n_eval_samples: 2048
   factors_to_probe: [shape, scale, orientation, pos_x, pos_y]
+
+# Weights & Biases. Set `enabled: true` and export WANDB_API_KEY before running.
+# Or run `wandb login` once on the box.
+wandb:
+  enabled: false
+  project: glr-stage-a
+  run_name: null        # null => uses f"seed{seed}"
+  tags: []

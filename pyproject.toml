@@ -32,6 +32,9 @@ data = [
 viz = [
     "matplotlib>=3.8",
 ]
+wandb = [
+    "wandb>=0.16",
+]
 
 [tool.setuptools.packages.find]
 include = ["glr*"]
