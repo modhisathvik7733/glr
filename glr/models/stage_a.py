@@ -19,10 +19,9 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-from einops import rearrange, repeat
+from einops import rearrange
 
 from glr.models.bcs import AbsorbBlock
-from glr.models.slot_attention import soft_position_embedding_2d
 
 
 class SpatialBroadcastDecoder(nn.Module):
@@ -30,9 +29,12 @@ class SpatialBroadcastDecoder(nn.Module):
 
     Memory note: this is the heaviest activation source in the model — every
     slot is broadcast to a full HxW grid before the conv stack, so activations
-    grow as `B × K × hidden_dim × H × W`. With plan-spec K=64, d=512, H=W=64
-    on a 32GB card you must use `use_checkpointing=True`, which trades ~1.3×
-    compute for ~3-4× lower decoder activation memory.
+    grow as `B × K × hidden_dim × H × W`.
+
+    Implementation detail: the broadcast tensor is built in **one allocation**
+    (slot expand + position-bias add) instead of `repeat → rearrange → pos_embed
+    → rearrange`. The naive sequence creates a transient extra 17 GB copy at
+    plan-spec K=64, d=512, B=64. The single-alloc version doesn't.
     """
 
     def __init__(
@@ -47,7 +49,15 @@ class SpatialBroadcastDecoder(nn.Module):
         self.image_size = image_size
         self.slot_dim = slot_dim
         self.use_checkpointing = use_checkpointing
-        self.pos_embed = soft_position_embedding_2d(image_size, image_size, slot_dim)
+        # Position grid is fixed; project to slot_dim via a small Linear so
+        # we get a (1, slot_dim, H, W) bias we add into the broadcast tensor.
+        h = w = image_size
+        xs = torch.linspace(0.0, 1.0, w)
+        ys = torch.linspace(0.0, 1.0, h)
+        yy, xx = torch.meshgrid(ys, xs, indexing="ij")
+        grid = torch.stack([xx, 1.0 - xx, yy, 1.0 - yy], dim=-1)  # (H, W, 4)
+        self.register_buffer("pos_grid", grid.unsqueeze(0))  # (1, H, W, 4)
+        self.pos_proj = nn.Linear(4, slot_dim)
         # tiny conv-decoder; outputs out_channels + 1 alpha per pixel per slot
         self.net = nn.Sequential(
             nn.Conv2d(slot_dim, hidden_dim, 5, padding=2),
@@ -60,26 +70,22 @@ class SpatialBroadcastDecoder(nn.Module):
         )
         self.out_channels = out_channels
 
-    def forward(self, slots: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """slots: (B, K, slot_dim) -> (recon, masks, per_slot_recon).
+    def _pos_bias(self, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+        """Return the (1, slot_dim, H, W) position bias in the requested dtype."""
+        pos = self.pos_proj(self.pos_grid.to(dtype=dtype, device=device))  # (1, H, W, d)
+        return pos.permute(0, 3, 1, 2)  # (1, d, H, W)
 
-        recon:           (B, C, H, W) — alpha-weighted sum across slots
-        masks:           (B, K, 1, H, W)
-        per_slot_recon:  (B, K, C, H, W)
-        """
-        b, k, _ = slots.shape
+    def forward(self, slots: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """slots: (B, K, slot_dim) -> (recon, masks, per_slot_recon)."""
+        b, k, d = slots.shape
         h = w = self.image_size
-        # broadcast each slot to a (H, W) feature plane
-        broadcast = repeat(slots, "b k d -> (b k) d h w", h=h, w=w)
-        # add position embedding (pos_embed expects (B, H, W, D))
-        broadcast = rearrange(broadcast, "bk d h w -> bk h w d")
-        broadcast = self.pos_embed(broadcast)
-        broadcast = rearrange(broadcast, "bk h w d -> bk d h w")
+        # Single big allocation: expand slots to (BK, d, H, W) via view+expand
+        # (no copy), then add the small (1, d, H, W) position bias to materialize.
+        pos_bias = self._pos_bias(slots.dtype, slots.device)
+        slots_flat = slots.reshape(b * k, d, 1, 1)
+        broadcast = slots_flat.expand(b * k, d, h, w) + pos_bias  # (BK, d, H, W)
 
         if self.use_checkpointing and self.training:
-            # Segment the conv stack so backward recomputes one segment at a
-            # time (otherwise all 4 conv outputs are alive simultaneously,
-            # which OOMs on small GPUs even though forward fits).
             out = torch.utils.checkpoint.checkpoint_sequential(
                 self.net, segments=3, input=broadcast, use_reentrant=False
             )
