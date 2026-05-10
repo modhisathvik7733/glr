@@ -82,6 +82,11 @@ class StageATrainerConfig:
 class StageATrainer:
     def __init__(self, config: StageATrainerConfig) -> None:
         self.config = config
+        # Enable cuDNN auto-tuner for the heavy 5x5 convs in the spatial-broadcast
+        # decoder. Picks the fastest cuDNN algorithm after a few iterations of
+        # warmup. Big speedup on A100 for our fixed-shape workload.
+        if torch.cuda.is_available():
+            torch.backends.cudnn.benchmark = True
         self.model = StageAModel(
             image_size=config.image_size,
             in_channels=config.in_channels,
