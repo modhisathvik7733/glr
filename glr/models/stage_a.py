@@ -76,8 +76,13 @@ class SpatialBroadcastDecoder(nn.Module):
         broadcast = self.pos_embed(broadcast)
         broadcast = rearrange(broadcast, "bk h w d -> bk d h w")
 
-        if self.use_checkpointing and self.training and broadcast.requires_grad:
-            out = torch.utils.checkpoint.checkpoint(self.net, broadcast, use_reentrant=False)
+        if self.use_checkpointing and self.training:
+            # Segment the conv stack so backward recomputes one segment at a
+            # time (otherwise all 4 conv outputs are alive simultaneously,
+            # which OOMs on small GPUs even though forward fits).
+            out = torch.utils.checkpoint.checkpoint_sequential(
+                self.net, segments=3, input=broadcast, use_reentrant=False
+            )
         else:
             out = self.net(broadcast)
         out = rearrange(out, "(b k) c h w -> b k c h w", b=b, k=k)

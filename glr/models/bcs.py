@@ -40,8 +40,15 @@ class ConvEncoder(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.use_checkpointing and self.training and x.requires_grad:
-            return torch.utils.checkpoint.checkpoint(self.net, x, use_reentrant=False)
+        if self.use_checkpointing and self.training:
+            # checkpoint_sequential splits the 8-module stack (4 conv + 4 gelu)
+            # into segments so each is recomputed independently during backward.
+            # Required because input tensors don't carry requires_grad in our
+            # data path; the older `requires_grad` guard silently skipped
+            # checkpointing entirely.
+            return torch.utils.checkpoint.checkpoint_sequential(
+                self.net, segments=4, input=x, use_reentrant=False
+            )
         return self.net(x)
 
 
