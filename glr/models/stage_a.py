@@ -204,6 +204,7 @@ class MaskedPredictionHead(nn.Module):
     def __init__(self, slot_dim: int, feat_dim: int, hidden_dim: int = 256) -> None:
         super().__init__()
         self.net = nn.Sequential(
+            nn.LayerNorm(slot_dim),
             nn.Linear(slot_dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, feat_dim),

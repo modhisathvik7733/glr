@@ -102,6 +102,11 @@ class AbsorbBlock(nn.Module):
             n_iters=slot_iters,
             sinkhorn_iters=sinkhorn_iters,
         )
+        # Bounds slot magnitude before any downstream consumer (decoder, masked
+        # predictor, VICReg, consistency). Without this, slot L2 norms drift
+        # unbounded and VICReg cov loss grows quadratically, producing the
+        # spike-and-recover oscillation observed during training.
+        self.slot_norm = nn.LayerNorm(slot_dim)
         self.tpr = TPRBinder(slot_dim, num_roles, filler_dim)
 
     def forward(self, image: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -124,6 +129,7 @@ class AbsorbBlock(nn.Module):
         feats = self.feat_mlp(self.feat_norm(feats))
 
         slots, attn = self.slot_attn(feats)                          # (B, K, slot_dim), (B, N, K)
+        slots = self.slot_norm(slots)
         role_weights, filler = self.tpr.factor(slots)
         bound = self.tpr.bind(role_weights, filler)
         return {

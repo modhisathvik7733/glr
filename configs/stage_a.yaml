@@ -30,18 +30,18 @@ model:
   decoder_layers: 6
 
 training:
-  lr: 5.0e-4
+  lr: 3.0e-4
   weight_decay: 0.1
   betas: [0.9, 0.95]
-  grad_clip: 1.0
-  warmup_steps: 500
-  total_steps: 20000
+  grad_clip: 0.5
+  warmup_steps: 1000
+  total_steps: 10000
   aux_warmup_frac: 0.05
   patch_size: 8
   mask_ratio: 0.4
   pred_weight: 1.0
-  vicreg_var_weight: 1.0
-  vicreg_cov_weight: 0.04
+  vicreg_var_weight: 0.5
+  vicreg_cov_weight: 0.2
   vicreg_total_weight: 0.5
   consistency_weight: 0.3
   usage_balance_weight: 0.1

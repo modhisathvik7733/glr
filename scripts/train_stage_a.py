@@ -84,6 +84,12 @@ def main() -> None:
     device = torch.device(args.device or cfg.get("device", "cpu"))
     print(f"[device] {device}")
 
+    # TF32 on Ampere+ silences the torch._inductor float32-matmul warning and
+    # gives ~10-20% TFLOPS on float32 matmuls without affecting bf16 autocast paths.
+    if device.type == "cuda":
+        torch.set_float32_matmul_precision("high")
+        torch.backends.cuda.matmul.allow_tf32 = True
+
     train_ds, held_out_pairs = build_dataset(cfg)
     n_workers = cfg["data"]["num_workers"]
     train_loader = DataLoader(
@@ -108,7 +114,17 @@ def main() -> None:
         seed=cfg["seed"] + 999,
         two_view=False,
     ) if cfg["data"]["source"] == "synthetic" else train_ds
-    eval_loader = DataLoader(eval_ds, batch_size=128, shuffle=False, num_workers=2)
+    # Match eval batch_size to train batch_size (and drop_last) so the compiled
+    # model graph hits the cache on eval too. With mismatched shapes torch.compile
+    # silently recompiles the eval-mode forward, producing the multi-minute pause
+    # observed at step 2000.
+    eval_loader = DataLoader(
+        eval_ds,
+        batch_size=cfg["data"]["batch_size"],
+        shuffle=False,
+        num_workers=2,
+        drop_last=True,
+    )
 
     train_cfg = StageATrainerConfig(
         image_size=cfg["data"]["image_size"],
