@@ -32,7 +32,7 @@ from torch.utils.data import Dataset
 
 DSPRITES_FILE = "dsprites_ndarray_co1sh3sc6or40x32y32_64x64.npz"
 DSPRITES_URL = (
-    "https://github.com/deepmind/dsprites-dataset/raw/master/dsprites_ndarray_co1sh3sc6or40x32y32_64x64.npz"
+    "https://raw.githubusercontent.com/google-deepmind/dsprites-dataset/master/dsprites_ndarray_co1sh3sc6or40x32y32_64x64.npz"
 )
 DSPRITES_FACTORS = ("color", "shape", "scale", "orientation", "pos_x", "pos_y")
 
